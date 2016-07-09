@@ -1,0 +1,202 @@
+#cloud-config
+
+coreos:
+  etcd2:
+    name: "slave-dois"
+
+    initial-advertise-peer-urls: "http://192.168.56.103:2380"
+    listen-peer-urls: "http://192.168.56.103:2380"
+    listen-client-urls: "http://192.168.56.103:2379,http://127.0.0.1:2379,http://127.0.0.1:4001"
+    advertise-client-urls: "http://192.168.56.103:2379"
+    initial-cluster-token: "cluster"
+    initial-cluster: "master=http://192.168.56.101:2380,slave-um=http://192.168.56.102:2380,slave-dois=http://192.168.56.103:2380,slave-tres=http://192.168.56.104:2380"
+    initial-cluster-state: "new"
+
+  update:
+    reboot-strategy: "off"
+
+  units:
+    - name: etcd2.service
+      command: start
+    - name: fleet.service
+      command: start
+
+hostname: "slave-dois"
+
+write_files:
+  - path: "/etc/flannel/options.env"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      FLANNELD_IFACE=192.168.56.103
+      FLANNELD_ETCD_ENDPOINTS=http://192.168.56.101:2379
+  - path: "/etc/systemd/system/flanneld.service.d/40-ExecStartPre-symlink.conf"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      [Service]
+      ExecStartPre=/usr/bin/ln -sf /etc/flannel/options.env /run/flannel/options.env
+  - path: "/etc/systemd/system/kubelet.service"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      [Service]
+      ExecStartPre=/usr/bin/mkdir -p /etc/kubernetes/manifests
+      ExecStartPre=/usr/bin/ln -sf /etc/kubernetes/ssl/two-worker.pem /etc/kubernetes/ssl/worker.pem
+      ExecStartPre=/usr/bin/ln -sf /etc/kubernetes/ssl/two-worker-key.pem /etc/kubernetes/ssl/worker-key.pem
+      ExecStartPre=/usr/bin/mkdir -p /var/log/containers
+      
+      Environment=KUBELET_VERSION=v1.2.4_coreos.1
+      Environment="RKT_OPTS=--volume var-log,kind=host,source=/var/log --mount volume=var-log,target=/var/log"
+      ExecStart=/usr/lib/coreos/kubelet-wrapper \
+        --api-servers=https://192.168.56.101 \
+        --register-node=true \
+        --allow-privileged=true \
+        --config=/etc/kubernetes/manifests \
+        --hostname-override=192.168.56.103 \
+        --cluster-dns=10.3.0.10 \
+        --cluster-domain=cluster.local \
+        --kubeconfig=/etc/kubernetes/worker-kubeconfig.yaml \
+        --tls-cert-file=/etc/kubernetes/ssl/worker.pem \
+        --tls-private-key-file=/etc/kubernetes/ssl/worker-key.pem
+      Restart=always
+      RestartSec=10
+      [Install]
+      WantedBy=multi-user.target
+  - path: "/etc/kubernetes/manifests/kube-proxy.yaml"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: kube-proxy
+        namespace: kube-system
+      spec:
+        hostNetwork: true
+        containers:
+        - name: kube-proxy
+          #image: gcr.io/google_containers/hyperkube:v1.0.6
+          image: quay.io/coreos/hyperkube:v1.2.4_coreos.1
+          command:
+          - /hyperkube
+          - proxy
+          - --master=https://192.168.56.101
+          - --kubeconfig=/etc/kubernetes/worker-kubeconfig.yaml
+          - --proxy-mode=iptables
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - mountPath: /etc/ssl/certs
+              name: "ssl-certs"
+            - mountPath: /etc/kubernetes/worker-kubeconfig.yaml
+              name: "kubeconfig"
+              readOnly: true
+            - mountPath: /etc/kubernetes/ssl
+              name: "etc-kube-ssl"
+              readOnly: true
+        volumes:
+          - name: "ssl-certs"
+            hostPath:
+              path: "/usr/share/ca-certificates"
+          - name: "kubeconfig"
+            hostPath:
+              path: "/etc/kubernetes/worker-kubeconfig.yaml"
+          - name: "etc-kube-ssl"
+            hostPath:
+              path: "/etc/kubernetes/ssl" 
+  - path: "/etc/kubernetes/worker-kubeconfig.yaml"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      apiVersion: v1
+      kind: Config
+      clusters:
+      - name: local
+        cluster:
+          certificate-authority: /etc/kubernetes/ssl/ca.pem
+      users:
+      - name: kubelet
+        user:
+          client-certificate: /etc/kubernetes/ssl/worker.pem
+          client-key: /etc/kubernetes/ssl/worker-key.pem
+      contexts:
+      - context:
+          cluster: local
+          user: kubelet
+        name: kubelet-context
+      current-context: kubelet-context 
+  - path: "/etc/kubernetes/ssl/ca.pem"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      -----BEGIN CERTIFICATE-----
+      MIIC9zCCAd+gAwIBAgIJAKACEYFR5HYSMA0GCSqGSIb3DQEBCwUAMBIxEDAOBgNV
+      BAMMB2t1YmUtY2EwHhcNMTYwNzA5MTAxMjA4WhcNNDMxMTI1MTAxMjA4WjASMRAw
+      DgYDVQQDDAdrdWJlLWNhMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA
+      nrNAuKv5iyJYjWpa+u2jpW0/5qx1tilV0crfgHh83Li7QSpxrCsaH0juBgP9xDc2
+      Pg/G5AHc+HK91TDhZMgKJwrQDbj3dUNBJiwzYbNKMdTQvs6GLL1hXArfuJDHJ8zO
+      8m1I03Vrh80QXgo8mxGwoVMZMmOsNs9J8PvqeqjyVFO16D81ae5/l/Dmq7H5duC8
+      XqAPvVZvwAlLyBJbIPWSeGYMXH2TtHbVhynoVc7+UFYzp3voUEiUHFnM5+w9syb2
+      M84a9Hw1n1JE87r1b52VING0jP82ITMBjjQI/wdwBplODgpqGFQK+xikA6XAKu/C
+      gzJlwz/WfuOdoDtbvePzfQIDAQABo1AwTjAdBgNVHQ4EFgQUtTfCEDdVVQIA/xli
+      /QnSrqb65LYwHwYDVR0jBBgwFoAUtTfCEDdVVQIA/xli/QnSrqb65LYwDAYDVR0T
+      BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAfF/QPlJ2ZEjXbP1eHCtN4NJlz/EP
+      weis6nEwPsocafzgZ4pnmnrg03kNBEobpGJttFtg3qBp7B+uVjJoUkIFkr+RlgvC
+      8TPfjeMpR/5is86InU1jzWyk3r7BMtZu1evM6EiWKaxrZjbflx+ZhTm7lAMR+iKq
+      D6ivOisdTDZzToGNaTyrxndjMV9gMHTKLZbfQGEhGPHyH7ttDWt2qZGa9SWjgoRy
+      7DG8HPxOtQcNvUk7It7no9m3rW8gM2im9sg0BWQq3E7K2ejR6jaMkt6+UAi2HJS/
+      +eajPYrGurro2jwjWakiwLGmpAQU1RFV9Xz+OWgeMftu4SJ7ne4BTf9Ezg==
+      -----END CERTIFICATE-----
+  - path: "/etc/kubernetes/ssl/two-worker.pem"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      -----BEGIN CERTIFICATE-----
+      MIICpDCCAYwCCQDEjR0S+GinVTANBgkqhkiG9w0BAQsFADASMRAwDgYDVQQDDAdr
+      dWJlLWNhMB4XDTE2MDcwOTEwMTYzOFoXDTE3MDcwOTEwMTYzOFowFjEUMBIGA1UE
+      AwwLa3ViZS13b3JrZXIwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDV
+      BGyIjk0RDLIPtJtNUJtymZCvNbj9iD9o5t0GuYEvRZIZL7hqT8+K53TSiSakWy5I
+      qNYZb18zrahISTWbbCyNBP205RCcI5sf/iKohbI5fpRsSXssUzPFO/9u27KKlTCp
+      G1yOGT20cOB7ErHZJghUvSMO2nDwN6xU2AKUEDsiyDITStovnz0VjcGlxrdJHKud
+      wwNvFlt9gfE8HWwsW1ZzwX6v/Xlr8l7cA+qtucE+T+4EARTp509hbk0zz8oaoxIt
+      FgGO5SYCj3L8TB7lDXPm6ZQ4h7bu9timAhObvTA258w+aVevVwiZjuP+eTbLNvJq
+      AuRrIvw5E4zYHbIgZ0ovAgMBAAEwDQYJKoZIhvcNAQELBQADggEBAAPTu6Sy6lpO
+      n65MESAt1xExez8aICW/PRaptIoS5RncRV9miHX/LdY62iQxEKlZVD+v+3MspAce
+      bc7BDm6nLKTm6/GuOU6G2FBoiD6FtFOpBXvap2bdXgeZQA8ASw1vcG92jPEYGIv0
+      6ppWNZx0CUkPC/vsZwa3Sa9nRtpkXjigINQsW+D3IpJkol6+2A2Y6Ayz4ngO61lj
+      QR9LAA+QBUsn46E203w3rJb+J1BQwe4ssUt6IU0RxGzL9xzXOpnRb6BVfWrf8OVg
+      WR/0DvGcrlKfFoBMP5SaUWgtQtQqnp5sj+ictHbwTO0PlGgMa12H4tNBh9dTegjL
+      L41h1jLFZY0=
+      -----END CERTIFICATE-----
+  - path: "/etc/kubernetes/ssl/two-worker-key.pem"
+    permissions: "0600"
+    owner: "root"
+    content: |
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEpQIBAAKCAQEA1QRsiI5NEQyyD7SbTVCbcpmQrzW4/Yg/aObdBrmBL0WSGS+4
+      ak/Piud00okmpFsuSKjWGW9fM62oSEk1m2wsjQT9tOUQnCObH/4iqIWyOX6UbEl7
+      LFMzxTv/btuyipUwqRtcjhk9tHDgexKx2SYIVL0jDtpw8DesVNgClBA7IsgyE0ra
+      L589FY3Bpca3SRyrncMDbxZbfYHxPB1sLFtWc8F+r/15a/Je3APqrbnBPk/uBAEU
+      6edPYW5NM8/KGqMSLRYBjuUmAo9y/Ewe5Q1z5umUOIe27vbYpgITm70wNufMPmlX
+      r1cImY7j/nk2yzbyagLkayL8OROM2B2yIGdKLwIDAQABAoIBAQCmmxEwNOw924oh
+      EoctD1Clb0pkX0ZStY+ywm445joN+QHtxQ8dx1JyN9l9GVwpzE8E8ViTCDKTvs0R
+      zICrEQ4/NZohM8+r74VSnngJCph8s23uzAIUhvbE2spLsHWSQmGOwiG/2ioSyP4q
+      BFMpnb+CV3PmGB+hIkodCd3qZE98QV2nswZUYye+veRdHuwOsx3wJaLlZ72UM9tr
+      epyxGBjU5qKMEoFGaPKInM/+lI9fKcpqFdZXRPzdMUzwAEAOhWuck1KO4idXMx7N
+      cnCPGpVchjLuBztdDCBkJNfur6qsvPUdGePlMZKyVYL6vooiqkZC00uc1p1inw/c
+      0LSdz4LRAoGBAP3g6UzUrFNIFKSipHPQNcdJxR/CWvCNKCOYU9hi2ywe2UJNEeOu
+      f+a5D546fviz8mw1WBwwDCcZ0l4vfbLo/kSarNteh0/rUcwfsnCs7KNowFcZUe0n
+      AeaHmCeE8w0LCQbjaUpuyPpFQylvv+5o9Im/LPja7WVMAMvIW1h5vy2jAoGBANbM
+      GoCkghSYPDd/RtsxOiyjzbBRVRvUKmD/Bh4r/DH6X1VvOyXm8vLzGg2GQVss/sbH
+      neRagehkJV4I3A3UptcNG2lcn3NqcbuYa9zHXsWcDzYCQxie0OOxnF/rj4HKysEc
+      KAgQCFP4ielnNf9AKn3HJVFq0g+pwd0FP40cMWIFAoGBALm59/LFAuxKJw/qC/TN
+      tQn95b++J1kjauHfZjc+2qgESVw/lX7DAb6AU/SlRo4a1pZiz/qPC9TvBv7wLzzb
+      RmhZ32r8VHEa7dQuvBPB7bv9vff6Bf1ANBu5xo3irQw1rnzjkPtq4Ix2bxO5NOfs
+      0DiVKwlC37jjSRHLmUe4iSuRAoGAT2Th5urnqfUbTOgeqKZpelaRkLp/WunxQCkD
+      eeOINHD3C/0xP7E9288/sgAN6EWZZqAiHGXX3q4lobxkmjgf8x1FJIy341FU+KI+
+      PDz1KtWkSbJMWq1ZSNA9nLbVNIRgrUBbC5/hdChJ0Zv0uYReMF+Ly6xQOLnmjmuC
+      MgZZuoECgYEA+GC/0LTWCfB1tgeI8hihv0Om4auFsGeFJdIGPYPG3xY9MVhqFa6Z
+      dTY3mTXSjJNElmdcjEiB3I6TGPbIMAYqJLVqUwvHEW+Lt0Sie86xTlXflpVtDWQG
+      b41lUjRbqizRD4LmWjyyKcTB00HoIB/py9Y101mheLnHw+HYG2us0dc=
+      -----END RSA PRIVATE KEY-----
