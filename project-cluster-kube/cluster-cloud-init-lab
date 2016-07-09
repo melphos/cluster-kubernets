@@ -75,7 +75,7 @@ write_files:
           - --allow-privileged=true
           - --service-cluster-ip-range=10.3.0.0/24
           - --secure-port=443
-          - --advertise-address=172.16.70.10
+          - --advertise-address=172.16.71.10
           - --admission-control=NamespaceLifecycle,NamespaceExists,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota
           - --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem
           - --tls-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
