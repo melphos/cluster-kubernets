@@ -31,7 +31,7 @@ write_files:
       
       Environment=KUBELET_VERSION=v1.2.4_coreos.1
       Environment="RKT_OPTS=--volume var-log,kind=host,source=/var/log --mount volume=var-log,target=/var/log"
-      ExecStart=/usr/lib/coreos/kubelet-wrapper \
+      ExecStart=/opt/bin/kubelet \
         --api-servers=https://172.160.71.10 \
         --register-node=true \
         --allow-privileged=true \
