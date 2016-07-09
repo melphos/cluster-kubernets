@@ -1,0 +1,330 @@
+#cloud-config
+
+coreos:
+
+  update:
+    reboot-strategy: "off"
+
+hostname: "coreos-01-kube-master"
+
+write_files:
+  - path: "/opt/nfs/inicio"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      inicio
+  - path: "/etc/exports"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      /opt/nfs/ *(rw,async,no_subtree_check,no_root_squash,fsid=0)
+  - path: "/etc/flannel/options.env"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      FLANNELD_IFACE=172.16.70.10
+      FLANNELD_ETCD_ENDPOINTS=http://172.16.70.10:2379
+  - path: "/etc/systemd/system/flanneld.service.d/40-ExecStartPre-symlink.conf"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      [Service]
+      ExecStartPre=/usr/bin/ln -sf /etc/flannel/options.env /run/flannel/options.env
+  - path: "/etc/systemd/system/kubelet.service"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      [Service]
+      ExecStartPre=/usr/bin/mkdir -p /etc/kubernetes/manifests
+      ExecStartPre=/usr/bin/mkdir -p /var/log/containers
+      
+      Environment=KUBELET_VERSION=v1.2.4_coreos.1
+      Environment="RKT_OPTS=--volume var-log,kind=host,source=/var/log --mount volume=var-log,target=/var/log"
+      ExecStart=/usr/lib/coreos/kubelet-wrapper \
+        --api-servers=http://127.0.0.1:8080 \
+        --register-schedulable=false \
+        --allow-privileged=true \
+        --config=/etc/kubernetes/manifests \
+        --hostname-override=172.16.71.10 \
+        --cluster-dns=10.3.0.10 \
+        --cluster-domain=cluster.local
+      Restart=always
+      RestartSec=10
+      [Install]
+      WantedBy=multi-user.target
+  - path: "/etc/kubernetes/manifests/kube-apiserver.yaml"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: kube-apiserver
+        namespace: kube-system
+      spec:
+        hostNetwork: true
+        containers:
+        - name: kube-apiserver
+          #image: gcr.io/google_containers/hyperkube:v1.0.6
+          image: quay.io/coreos/hyperkube:v1.2.4_coreos.1
+          command:
+          - /hyperkube
+          - apiserver
+          - --bind-address=0.0.0.0
+          - --etcd-servers=http://172.16.70.10:2379
+          - --allow-privileged=true
+          - --service-cluster-ip-range=10.3.0.0/24
+          - --secure-port=443
+          - --advertise-address=172.16.70.10
+          - --admission-control=NamespaceLifecycle,NamespaceExists,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota
+          - --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem
+          - --tls-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
+          - --client-ca-file=/etc/kubernetes/ssl/ca.pem
+          - --service-account-key-file=/etc/kubernetes/ssl/apiserver-key.pem
+          ports:
+          - containerPort: 443
+            hostPort: 443
+            name: https
+          - containerPort: 8080
+            hostPort: 8080
+            name: local
+          volumeMounts:
+          - mountPath: /etc/kubernetes/ssl
+            name: ssl-certs-kubernetes
+            readOnly: true
+          - mountPath: /etc/ssl/certs
+            name: ssl-certs-host
+            readOnly: true
+        volumes:
+        - hostPath:
+            path: /etc/kubernetes/ssl
+          name: ssl-certs-kubernetes
+        - hostPath:
+            path: /usr/share/ca-certificates
+          name: ssl-certs-host
+  - path: "/etc/kubernetes/manifests/kube-proxy.yaml"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: kube-proxy
+        namespace: kube-system
+      spec:
+        hostNetwork: true
+        containers:
+        - name: kube-proxy
+          command:
+          #image: gcr.io/google_containers/hyperkube:v1.0.6
+          image: quay.io/coreos/hyperkube:v1.2.4_coreos.1
+          - /hyperkube
+          - proxy
+          - --master=http://127.0.0.1:8080
+          - --proxy-mode=iptables
+          securityContext:
+            privileged: true
+          volumeMounts:
+          - mountPath: /etc/ssl/certs
+            name: ssl-certs-host
+            readOnly: true
+        volumes:
+        - hostPath:
+            path: /usr/share/ca-certificates
+          name: ssl-certs-host
+  - path: "/etc/kubernetes/manifests/kube-podmaster.yaml"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: kube-podmaster
+        namespace: kube-system
+      spec:
+        hostNetwork: true
+        containers:
+        - name: scheduler-elector
+          image: gcr.io/google_containers/podmaster:1.1
+          command:
+          - /podmaster
+          - --etcd-servers=http://172.16.70.10:2379
+          - --key=scheduler
+          - --whoami=172.16.70.10
+          - --source-file=/src/manifests/kube-scheduler.yaml
+          - --dest-file=/dst/manifests/kube-scheduler.yaml
+          volumeMounts:
+          - mountPath: /src/manifests
+            name: manifest-src
+            readOnly: true
+          - mountPath: /dst/manifests
+            name: manifest-dst
+        - name: controller-manager-elector
+          image: gcr.io/google_containers/podmaster:1.1
+          command:
+          - /podmaster
+          - --etcd-servers=http://172.16.70.10:2379
+          - --key=controller
+          - --whoami=172.16.70.10
+          - --source-file=/src/manifests/kube-controller-manager.yaml
+          - --dest-file=/dst/manifests/kube-controller-manager.yaml
+          terminationMessagePath: /dev/termination-log
+          volumeMounts:
+          - mountPath: /src/manifests
+            name: manifest-src
+            readOnly: true
+          - mountPath: /dst/manifests
+            name: manifest-dst
+        volumes:
+        - hostPath:
+            path: /srv/kubernetes/manifests
+          name: manifest-src
+        - hostPath:
+            path: /etc/kubernetes/manifests
+          name: manifest-dst
+  - path: "/etc/kubernetes/manifests/kube-controller-manager.yaml"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: kube-controller-manager
+        namespace: kube-system
+      spec:
+        hostNetwork: true
+        containers:
+        - name: kube-controller-manager
+          #image: gcr.io/google_containers/hyperkube:v1.0.6
+          image: quay.io/coreos/hyperkube:v1.2.4_coreos.1
+          command:
+          - /hyperkube
+          - controller-manager
+          - --master=http://127.0.0.1:8080
+          - --leader-elect=true 
+          - --service-account-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
+          - --root-ca-file=/etc/kubernetes/ssl/ca.pem
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /healthz
+              port: 10252
+            initialDelaySeconds: 15
+            timeoutSeconds: 1
+          volumeMounts:
+          - mountPath: /etc/kubernetes/ssl
+            name: ssl-certs-kubernetes
+            readOnly: true
+          - mountPath: /etc/ssl/certs
+            name: ssl-certs-host
+            readOnly: true
+        volumes:
+        - hostPath:
+            path: /etc/kubernetes/ssl
+          name: ssl-certs-kubernetes
+        - hostPath:
+            path: /usr/share/ca-certificates
+          name: ssl-certs-host  
+  - path: "/etc/kubernetes/manifests/kube-scheduler.yaml"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: kube-scheduler
+        namespace: kube-system
+      spec:
+        hostNetwork: true
+        containers:
+        - name: kube-scheduler
+          #image: gcr.io/google_containers/hyperkube:v1.0.6
+          image: quay.io/coreos/hyperkube:v1.2.4_coreos.1
+          command:
+          - /hyperkube
+          - scheduler
+          - --master=http://127.0.0.1:8080
+          - --leader-elect=true
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /healthz
+              port: 10251
+            initialDelaySeconds: 15
+            timeoutSeconds: 1 
+  - path: "/etc/kubernetes/ssl/ca.pem"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      -----BEGIN CERTIFICATE-----
+      MIIC9zCCAd+gAwIBAgIJAKACEYFR5HYSMA0GCSqGSIb3DQEBCwUAMBIxEDAOBgNV
+      BAMMB2t1YmUtY2EwHhcNMTYwNzA5MTAxMjA4WhcNNDMxMTI1MTAxMjA4WjASMRAw
+      DgYDVQQDDAdrdWJlLWNhMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA
+      nrNAuKv5iyJYjWpa+u2jpW0/5qx1tilV0crfgHh83Li7QSpxrCsaH0juBgP9xDc2
+      Pg/G5AHc+HK91TDhZMgKJwrQDbj3dUNBJiwzYbNKMdTQvs6GLL1hXArfuJDHJ8zO
+      8m1I03Vrh80QXgo8mxGwoVMZMmOsNs9J8PvqeqjyVFO16D81ae5/l/Dmq7H5duC8
+      XqAPvVZvwAlLyBJbIPWSeGYMXH2TtHbVhynoVc7+UFYzp3voUEiUHFnM5+w9syb2
+      M84a9Hw1n1JE87r1b52VING0jP82ITMBjjQI/wdwBplODgpqGFQK+xikA6XAKu/C
+      gzJlwz/WfuOdoDtbvePzfQIDAQABo1AwTjAdBgNVHQ4EFgQUtTfCEDdVVQIA/xli
+      /QnSrqb65LYwHwYDVR0jBBgwFoAUtTfCEDdVVQIA/xli/QnSrqb65LYwDAYDVR0T
+      BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAfF/QPlJ2ZEjXbP1eHCtN4NJlz/EP
+      weis6nEwPsocafzgZ4pnmnrg03kNBEobpGJttFtg3qBp7B+uVjJoUkIFkr+RlgvC
+      8TPfjeMpR/5is86InU1jzWyk3r7BMtZu1evM6EiWKaxrZjbflx+ZhTm7lAMR+iKq
+      D6ivOisdTDZzToGNaTyrxndjMV9gMHTKLZbfQGEhGPHyH7ttDWt2qZGa9SWjgoRy
+      7DG8HPxOtQcNvUk7It7no9m3rW8gM2im9sg0BWQq3E7K2ejR6jaMkt6+UAi2HJS/
+      +eajPYrGurro2jwjWakiwLGmpAQU1RFV9Xz+OWgeMftu4SJ7ne4BTf9Ezg==
+      -----END CERTIFICATE-----
+  - path: "/etc/kubernetes/ssl/apiserver.pem"
+    permissions: "0644"
+    owner: "root"
+    content: |
+      -----BEGIN CERTIFICATE-----
+      MIIC/zCCAeegAwIBAgIJAMSNHRL4aKdTMA0GCSqGSIb3DQEBCwUAMBIxEDAOBgNV
+      BAMMB2t1YmUtY2EwHhcNMTYwNzA5MTAxMzIxWhcNMTcwNzA5MTAxMzIxWjAZMRcw
+      FQYDVQQDDA5rdWJlLWFwaXNlcnZlcjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCC
+      AQoCggEBALsCl8vHTZ1kFtd+MMLni1u48tZRw/XvavjfUcaXqSZcFqzqPsWT3jFS
+      OWeWkyBWcvkZLXMyXsN3kc4pcamGOj4a2ghX7Wzl+BNvGuGyVx0ZFhwMilz3SPLK
+      H+t8sLe0JlEWLeDQKMw4uduIoeBbvWS9Uon2CcbuHUoUGULfHZz3L7iwbERfwEvo
+      H6NfCTCxsyyTJBzNrKjbyEYWOTcC0wc4wlsbyzZ/Izte8X0vkenbxwsS2W621rqR
+      bsuwudPI4QYLxYEfi2cn4cxCkQTOBKUSWcORz0+y548Y9DRxPjSCs/yWUSkHbOsY
+      5Kg+d/FaKCi1esIANTK65Bt2pzicWLsCAwEAAaNRME8wCQYDVR0TBAIwADALBgNV
+      HQ8EBAMCBeAwNQYDVR0RBC4wLIIKa3ViZXJuZXRlc4ISa3ViZXJuZXRlcy5kZWZh
+      dWx0hwQKAwABhwTAqDhlMA0GCSqGSIb3DQEBCwUAA4IBAQAfDARvC5BR1/K5NxqE
+      A4mUYb72fk1BIzNU+47Qssi+q9T83P586zZ+ygXVMy1pbb/zfFxtJSXZFvceyswj
+      Qtmu8c4MGKRxhJC8ID9u503DbRbYDIyIPo3dkbRMtdijyqYWH3PJi42hzjgPMxNW
+      zDKcbIRO/QmJ5OEst4oxJoIdW/BNXJ4YIbV1p4j1qFatLO8BNc1zuiqC/CqCB5fA
+      DuPx9ESSLxb878HGsQ+SGV+t/+h3fb7wAL6+Mrq6XsJLRuuMMwFfOPTCzuNqCxBt
+      YgkeJVUacTcmhQ57YW2YFBi5sLMSlkGqXI157iZszpCcCZ/ngILxYN74ioMrhwLn
+      uYbY
+      -----END CERTIFICATE----- 
+  - path: "/etc/kubernetes/ssl/apiserver-key.pem"
+    permissions: "0600"
+    owner: "root"
+    content: |
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEpAIBAAKCAQEAuwKXy8dNnWQW134wwueLW7jy1lHD9e9q+N9RxpepJlwWrOo+
+      xZPeMVI5Z5aTIFZy+RktczJew3eRzilxqYY6PhraCFftbOX4E28a4bJXHRkWHAyK
+      XPdI8sof63ywt7QmURYt4NAozDi524ih4Fu9ZL1SifYJxu4dShQZQt8dnPcvuLBs
+      RF/AS+gfo18JMLGzLJMkHM2sqNvIRhY5NwLTBzjCWxvLNn8jO17xfS+R6dvHCxLZ
+      brbWupFuy7C508jhBgvFgR+LZyfhzEKRBM4EpRJZw5HPT7Lnjxj0NHE+NIKz/JZR
+      KQds6xjkqD538VooKLV6wgA1MrrkG3anOJxYuwIDAQABAoIBAGjKDCr4s+oUsqPv
+      pv0f57vux8wGJytBDA0Gffks9HB1O5OK8r+dmuzCKT59ZlXBe01PqWMaf3VCI+aE
+      3JbkivBP9YqlUnop5rdlE4gSebPpYbU35bQwMKUzU22OAiv9+1aGehC2M5Yz1xlH
+      14Uzgs3XNE/wGQxqUuk2l+0bvqk79ks/wh4jyvXt3JJaQqOkKN4+ErR5jeThcAtZ
+      p8xYH3JBhcwOUrhqh1AmkGxrFo8fW6hMBZrFTqUUmEivcLw2c3ecJHMDswAXYhVj
+      waFiY4ZdUEizXf4iZtjJNA1+ugLt1SL6LSLcRO43tMPiVSDm28Sa0FJYVZeOu6z2
+      fMW2xWkCgYEA+EF5nDP67h4p+9EXuV+sTW4BiqXOXd7+3zThyYWyoZbRAwW9OyGP
+      KOhS24MuoeFJvfk8xaZziUb4WjbLT0UMsGkZfdgctuX4LtHgrA6Dlt6SZhfvnYFc
+      5RHcyILAApV1kzaB66MtVpnIl9sOMfoR/Hk+3Wz9hMmoh+pGg+swc78CgYEAwNgF
+      grFCfpxpCkVS7PsWDgnAp6IeZz9C1BtHuW0REHEzP2OBhkSuSLPrKETVvqtqhlQ1
+      3GmGskIPQlEuRLMr+xamllP7wRsCFDg5ZiniPwksMIAPQno2flRiTcOWtEzwj1nN
+      X8dF3nKhkb3dikRpDHcueJmmgrVnMJ4sVyqDagUCgYBkCbZgnI2scJlIcSyXNZdw
+      KDkUztXG+/pGpb+qfmbKOMUG68QiVNakjGH/NPCQqQEXPZ0gpH+APQoNCHGLAu8n
+      E2MDVBfWF/uXmlln2/1oyU3DODgFh0CQyk7mudF3+RRE+z0FYF7/u76aetpQh03C
+      KHWNssLCRKTWCDDcLeT7bwKBgQCZwiPypp8cEF34IHoUFcbp/oCrqCmRrPD96Zpw
+      kDPQ5lE0M4Ssp8pGkZ3oB6pdUpOm8zHWwhTxwJYmDFBV2n4wv0ioB+Jtf7lSodmy
+      SabpF8kyCokgOg2FAIc49cANlmMgCTwlJ9/fk4qbh8VCX3VayRQ2eFw5T6YtL5Cv
+      F2iceQKBgQDe0fIZqs39EcHzwU6YA9xUeU5INIIAFJS32rm8U89Brbfyta3rxe/h
+      7ZJoT3n0Y9fUj9kVMgsR7e6mPvTLGBlnrbLHPMHr488CNEeV0WmC4ojVFZPBwLI0
+      hBLZdfScvFeNiE0ZoADoyytmZzh2UHSZDC2ivbNMm7S+3JDSSR8aGQ==
+      -----END RSA PRIVATE KEY-----
